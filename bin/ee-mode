@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+# Sound modes for the HyperX Cloud III on EasyEffects.
+# Run with no arguments for the dashboard, or `ee-mode help` for everything else.
+
+set -u
+
+readonly HEADSET_MATCH=HyperX_Cloud_III
+
+# key|command|preset|title|description
+readonly MODES=(
+    "1|daily|Cloud3_Daily|Daily|Anime, rap, pop: Z213-style bass"
+    "2|tarab|Cloud3_Tarab|Tarab|Tarab and old recordings: warm, natural vocals"
+    "3|cinema|Cloud3_Cinema|Cinema|Series and movies: clear dialogue, strong bass"
+    "4|punch|Test_Punch|Test Punch|Daily + bass harmonics"
+    "5|speakers|Test_Speakers|Test Speakers|Daily + speaker-like room"
+    "6|autolevel|Test_AutoLevel|Test AutoLevel|Daily + evened-out volume"
+)
+
+notify() {
+    command -v notify-send >/dev/null || return 0
+    notify-send -a "Easy Effects" -i com.github.wwmm.easyeffects \
+        -h string:x-canonical-private-synchronous:ee-mode -t 2500 "$1" "$2"
+}
+
+is_running() {
+    pgrep -x easyeffects >/dev/null
+}
+
+ensure_running() {
+    is_running && return 0
+    setsid -f easyeffects --hide-window --service-mode >/dev/null 2>&1 </dev/null
+    for _ in {1..10}; do
+        sleep 0.5
+        is_running && sleep 1 && return 0
+    done
+    return 1
+}
+
+bypassed() {
+    [ "$(easyeffects -b 3 2>/dev/null | tail -n 1)" = 1 ]
+}
+
+active_preset() {
+    easyeffects -s 2>/dev/null | sed -n 's/^output: //p'
+}
+
+default_sink() {
+    pactl get-default-sink 2>/dev/null
+}
+
+on_headset() {
+    case "$(default_sink)" in
+        *"$HEADSET_MATCH"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Print the MODES entry whose field number $1 equals $2.
+find_mode() {
+    local field=$1 value=$2 entry
+    for entry in "${MODES[@]}"; do
+        if [ "$(cut -d'|' -f"$field" <<<"$entry")" = "$value" ]; then
+            echo "$entry"
+            return 0
+        fi
+    done
+    return 1
+}
+
+current_label() {
+    if ! is_running; then
+        echo "EasyEffects is not running"
+        return
+    fi
+    if bypassed; then
+        echo "0: Effects OFF"
+        return
+    fi
+    local preset entry key title
+    preset=$(active_preset)
+    if [ "$preset" = Flat ]; then
+        echo "No effects (speakers or HDMI)"
+    elif entry=$(find_mode 3 "$preset"); then
+        IFS='|' read -r key _ _ title _ <<<"$entry"
+        echo "$key: $title"
+    else
+        echo "Preset: $preset"
+    fi
+}
+
+apply_mode() {
+    local entry=$1 preset title description
+    IFS='|' read -r _ _ preset title description <<<"$entry"
+    if ! ensure_running; then
+        notify "Easy Effects did not start" "Try opening it from the app menu."
+        return 1
+    fi
+    # Headset correction would colour speakers, so modes only apply to the HyperX.
+    if ! on_headset; then
+        notify "Not on the HyperX" "Modes are for the headset, so nothing changed."
+        return 1
+    fi
+    easyeffects -b 2 >/dev/null 2>&1
+    easyeffects -l "$preset" >/dev/null 2>&1
+    notify "$title" "$description"
+}
+
+toggle_effects() {
+    ensure_running || return 1
+    easyeffects --bypass-toggle >/dev/null 2>&1
+    sleep 0.3
+    if bypassed; then
+        notify "Effects OFF" "Raw sound. Press Windows+Alt+0 again to restore."
+    else
+        notify "Effects ON" "Your last mode is back."
+    fi
+}
+
+output_name() {
+    case "$(default_sink)" in
+        *"$HEADSET_MATCH"*) echo "HyperX Cloud III" ;;
+        *hdmi*) echo "HDMI" ;;
+        *analog*) echo "Speakers / Z213" ;;
+        *) echo "Other output" ;;
+    esac
+}
+
+volume_label() {
+    wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null |
+        awk '{ printf "%d%%%s", $2 * 100 + 0.5, ($3 ? " (muted)" : "") }'
+}
+
+# App names only. Media titles are never read: Kitty has no bidi, so Arabic would render reversed.
+playing_apps() {
+    LC_ALL=C pactl list sink-inputs 2>/dev/null | awk -F'"' '
+        /^Sink Input #/ { corked = 0 }
+        /Corked: yes/ { corked = 1 }
+        /application\.name = / && !corked { print $2 }
+    ' | LC_ALL=C tr -cd '[:print:]\n' | sort -u | paste -sd, - | sed 's/,/, /g'
+}
+
+show_help() {
+    cat <<'EOF'
+HyperX sound modes
+
+SHORTCUTS (hold Windows + Alt, tap a top-row number)
+  0  Effects off / on
+  1  Daily      Anime, rap, pop: Z213-style bass
+  2  Tarab      Tarab and old recordings: warm, natural vocals
+  3  Cinema     Series and movies: clear dialogue, strong bass
+  4  Test       Punch: Daily + bass harmonics
+  5  Test       Speakers: Daily + speaker-like room
+  6  Test       AutoLevel: Daily + evened-out volume
+  7  This help page
+  8  Dashboard
+  9  Popup with the current mode
+
+TERMINAL
+  ee-mode                  Live dashboard
+  ee-mode status           Print the current mode
+  ee-mode help             This page
+  ee-mode daily            Switch mode: daily, tarab, cinema,
+                           punch, speakers, autolevel
+  ee-mode off              Effects off / on
+
+SPEAKERS (Z213)
+  Switch output in the KDE volume menu. Other outputs play clean with no
+  effects, and mode keys only work while the HyperX is the output.
+EOF
+}
+
+dashboard() {
+    local bold dim green reset goto_top erase_below
+    bold=$(tput bold)
+    dim=$(tput dim)
+    green=$(tput setaf 2)
+    reset=$(tput sgr0)
+    goto_top=$(tput cup 0 0)
+    erase_below=$(tput ed)
+
+    tput smcup
+    tput civis
+    trap 'tput cnorm; tput rmcup' EXIT
+    trap 'exit 130' INT TERM HUP
+
+    local message="" key entry
+    while true; do
+        draw_dashboard
+        key=""
+        read -rsn1 -t 2 key
+        case "$key" in
+            q | Q) return ;;
+            h | H | '?')
+                printf '%s%s' "$goto_top" "$erase_below"
+                show_help
+                printf '\n%sPress any key to go back%s' "$dim" "$reset"
+                read -rsn1 _
+                message=""
+                ;;
+            0)
+                toggle_effects
+                message=""
+                ;;
+            [1-6])
+                entry=$(find_mode 1 "$key")
+                if apply_mode "$entry"; then
+                    message=""
+                else
+                    message="Modes only work on the HyperX. Nothing changed."
+                fi
+                ;;
+        esac
+    done
+}
+
+# Uses the colours and message from dashboard(). State is read first, so a slow read can't flicker.
+draw_dashboard() {
+    local label output volume apps active entry key title description marker frame
+    label=$(current_label)
+    output=$(output_name)
+    volume=$(volume_label)
+    apps=$(playing_apps)
+    active=${label%%:*}
+
+    frame="${bold}  HyperX Sound${reset}"$'\n\n'
+    frame+="  Mode     ${green}${bold}${label}${reset}"$'\n'
+    frame+="  Output   ${output}"$'\n'
+    frame+="  Volume   ${volume}"$'\n'
+    frame+="  Playing  ${apps:-nothing}"$'\n\n'
+    for entry in "${MODES[@]}"; do
+        IFS='|' read -r key _ _ title description <<<"$entry"
+        marker="  "
+        [ "$key" = "$active" ] && marker="${green}>${reset} "
+        frame+="$(printf '  %s%s  %-15s %s%s%s' "$marker" "$key" "$title" "$dim" "$description" "$reset")"$'\n'
+    done
+    marker="  "
+    [ "$active" = 0 ] && marker="${green}>${reset} "
+    frame+="  ${marker}0  Effects off/on"$'\n\n'
+    frame+="  ${dim}Press a number to switch   h help   q quit${reset}"$'\n'
+    [ -n "$message" ] && frame+="  ${message}"$'\n'
+    printf '%s%s%s' "$goto_top" "$erase_below" "$frame"
+}
+
+usage() {
+    echo "usage: ee-mode [daily|tarab|cinema|punch|speakers|autolevel|off|status|help]" >&2
+}
+
+main() {
+    local entry label
+    case "${1:-}" in
+        "")
+            if [ -t 0 ] && [ -t 1 ]; then
+                dashboard
+            else
+                current_label
+            fi
+            ;;
+        help | -h | --help)
+            show_help
+            if [ "${2:-}" = --wait ]; then
+                printf '\nPress any key to close'
+                read -rsn1 _
+            fi
+            ;;
+        status)
+            label=$(current_label)
+            echo "$label"
+            notify "$label" "Current sound mode"
+            ;;
+        off) toggle_effects ;;
+        *)
+            if entry=$(find_mode 2 "$1"); then
+                apply_mode "$entry"
+            else
+                usage
+                return 2
+            fi
+            ;;
+    esac
+}
+
+main "$@"
