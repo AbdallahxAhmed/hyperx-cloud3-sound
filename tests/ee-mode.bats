@@ -132,13 +132,64 @@ teardown() {
     [ "$status" -eq 2 ]
 }
 
+# Run a command in a real terminal, sending each printf-format key after the last has been handled.
+drive() {
+    local command=$1
+    shift
+    (
+        sleep 0.6
+        for key in "$@"; do
+            # shellcheck disable=SC2059  # the keys are printf formats on purpose
+            printf "$key"
+            sleep 0.3
+        done
+    ) | TERM=xterm timeout 20 script -qec "$command" /dev/null
+}
+
 @test "dashboard draws, switches, shows help and quits" {
-    run bash -c "(sleep 0.6; printf 2; sleep 0.8; printf h; sleep 0.4; printf x; sleep 0.4; printf q) |
-        TERM=xterm script -qec '$EE' /dev/null"
+    run drive "$EE" 2 h q q
     [[ "$output" == *"HyperX Sound"* ]]
     [[ "$output" == *"80%"* ]]
     [[ "$output" == *"SHORTCUTS"* ]]
     [ "$(cat "$STUB/preset")" = Cloud3_Tarab ]
+}
+
+@test "dashboard still takes keys after leaving help" {
+    run drive "$EE" h q 3 q
+    [ "$(cat "$STUB/preset")" = Cloud3_Cinema ]
+}
+
+@test "down and Enter apply the next mode" {
+    run drive "$EE" '\033[B' '\r' q
+    [ "$(cat "$STUB/preset")" = Cloud3_Tarab ]
+}
+
+@test "up moves the selection back" {
+    run drive "$EE" '\033[B' '\033[B' '\033[A' '\r' q
+    [ "$(cat "$STUB/preset")" = Cloud3_Tarab ]
+}
+
+@test "arrows work in application cursor mode" {
+    run drive "$EE" '\033OB' '\033OB' '\r' q
+    [ "$(cat "$STUB/preset")" = Cloud3_Cinema ]
+}
+
+@test "the selection stops at the last row" {
+    run drive "$EE" '\033[B\033[B\033[B\033[B\033[B\033[B\033[B\033[B\033[B' '\r' q
+    [ "$(cat "$STUB/bypass")" = 1 ]
+}
+
+@test "the selection stops at the first row" {
+    run drive "$EE" '\033[A' '\033[A' '\r' q
+    [ "$(cat "$STUB/preset")" = Cloud3_Daily ]
+}
+
+@test "the help window scrolls in a small terminal" {
+    run drive "stty rows 8 cols 80; $EE help --wait" q
+    [[ "$output" != *"mode keys only work"* ]]
+    run drive "stty rows 8 cols 80; $EE help --wait" \
+        '\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB\033OB' q
+    [[ "$output" == *"mode keys only work"* ]]
 }
 
 @test "dashboard shows app names but never media titles" {

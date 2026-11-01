@@ -38,7 +38,8 @@ Hold Windows + Alt and tap a number:
 | `8` | Dashboard |
 | `9` | Popup with the current mode |
 
-Or run `ee-mode` for the dashboard, and `ee-mode help` for every command.
+Or run `ee-mode` for the dashboard, and `ee-mode help` for every command. In the
+dashboard, Up/Down or the mouse wheel select a mode and Enter applies it.
 
 Modes only apply to the HyperX. Any other output plays clean with no effects.
 

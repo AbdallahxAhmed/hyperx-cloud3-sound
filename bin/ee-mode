@@ -16,6 +16,9 @@ readonly MODES=(
     "6|autolevel|Test_AutoLevel|Test AutoLevel|Daily + evened-out volume"
 )
 
+# Dashboard rows, top to bottom.
+readonly ROWS=(1 2 3 4 5 6 0)
+
 notify() {
     command -v notify-send >/dev/null || return 0
     notify-send -a "Easy Effects" -i com.github.wwmm.easyeffects \
@@ -163,17 +166,56 @@ TERMINAL
                            punch, speakers, autolevel
   ee-mode off              Effects off / on
 
+DASHBOARD
+  Up / Down or mouse wheel  Move through the modes
+  Enter                     Apply the highlighted mode
+  0-6                       Apply a mode directly
+  h                         This page
+  q                         Quit
+
 SPEAKERS (Z213)
   Switch output in the KDE volume menu. Other outputs play clean with no
   effects, and mode keys only work while the HyperX is the output.
 EOF
 }
 
+# A pager, so a small window can scroll. Terminals send the wheel as arrow keys here.
+page_help() {
+    if command -v less >/dev/null; then
+        show_help | less -R -Ps"Arrows or mouse wheel to scroll, q to close"
+    else
+        show_help
+        printf '\nPress any key to close'
+        read -rsn1 _
+    fi
+}
+
+# Set KEY to one key press: a character, up, down or enter. Empty means the wait timed out.
+read_key() {
+    local first rest=""
+    KEY=""
+    IFS= read -rsn1 -t 2 first || return 0
+    case "$first" in
+        "") KEY=enter ;;
+        $'\e')
+            # An arrow arrives as ESC plus two more bytes.
+            IFS= read -rsn2 -t 0.02 rest
+            case "$rest" in
+                '[A' | OA) KEY=up ;;
+                '[B' | OB) KEY=down ;;
+                *) KEY=other ;;
+            esac
+            ;;
+        *) KEY=$first ;;
+    esac
+}
+
 dashboard() {
-    local bold dim green reset goto_top erase_below
+    local bold dim green reverse reset goto_top erase_below
     bold=$(tput bold)
     dim=$(tput dim)
     green=$(tput setaf 2)
+    reverse=$(tput rev)
     reset=$(tput sgr0)
     goto_top=$(tput cup 0 0)
     erase_below=$(tput ed)
@@ -183,45 +225,84 @@ dashboard() {
     trap 'tput cnorm; tput rmcup' EXIT
     trap 'exit 130' INT TERM HUP
 
-    local message="" key entry
+    local message="" selected="" refresh=1 KEY
+    local label output volume apps active
     while true; do
+        if [ "$refresh" = 1 ]; then
+            read_dashboard_state
+        fi
+        [ -n "$selected" ] || selected=$(row_of "$active")
         draw_dashboard
-        key=""
-        read -rsn1 -t 2 key
-        case "$key" in
+        read_key
+        refresh=1
+        case "$KEY" in
             q | Q) return ;;
             h | H | '?')
-                printf '%s%s' "$goto_top" "$erase_below"
-                show_help
-                printf '\n%sPress any key to go back%s' "$dim" "$reset"
-                read -rsn1 _
+                page_help
+                # less leaves the alternate screen when it quits.
+                tput smcup
+                tput civis
                 message=""
                 ;;
-            0)
-                toggle_effects
-                message=""
+            up)
+                [ "$selected" -gt 0 ] && selected=$((selected - 1))
+                refresh=0
                 ;;
-            [1-6])
-                entry=$(find_mode 1 "$key")
-                if apply_mode "$entry"; then
-                    message=""
-                else
-                    message="Modes only work on the HyperX. Nothing changed."
-                fi
+            down)
+                [ "$selected" -lt $((${#ROWS[@]} - 1)) ] && selected=$((selected + 1))
+                refresh=0
+                ;;
+            enter) activate "${ROWS[selected]}" ;;
+            [0-6])
+                selected=$(row_of "$KEY")
+                activate "$KEY"
                 ;;
         esac
     done
 }
 
-# Uses the colours and message from dashboard(). State is read first, so a slow read can't flicker.
-draw_dashboard() {
-    local label output volume apps active entry key title description marker frame
+# Index in ROWS of a mode key. Anything else, such as "Preset", selects the first row.
+row_of() {
+    local i
+    for i in "${!ROWS[@]}"; do
+        if [ "${ROWS[i]}" = "$1" ]; then
+            echo "$i"
+            return
+        fi
+    done
+    echo 0
+}
+
+# Apply a dashboard row, setting message for dashboard() to show.
+activate() {
+    message=""
+    if [ "$1" = 0 ]; then
+        toggle_effects
+    elif ! apply_mode "$(find_mode 1 "$1")"; then
+        message="Modes only work on the HyperX. Nothing changed."
+    fi
+}
+
+# These reads are slow, so arrow keys redraw without repeating them.
+read_dashboard_state() {
     label=$(current_label)
     output=$(output_name)
     volume=$(volume_label)
     apps=$(playing_apps)
     active=${label%%:*}
+}
 
+# One list row: marker for the active mode, reverse video for the selected one.
+dashboard_row() {
+    local key=$1 title=$2 description=$3 marker="  " start=""
+    [ "$key" = "$active" ] && marker="${green}>${reset} "
+    [ "${ROWS[selected]}" = "$key" ] && start=$reverse
+    printf '  %s%s%s  %-15s%s %s%s%s\n' "$marker" "$start" "$key" "$title" "$reset" "$dim" "$description" "$reset"
+}
+
+# Uses the colours, state and message from dashboard().
+draw_dashboard() {
+    local entry key title description frame
     frame="${bold}  HyperX Sound${reset}"$'\n\n'
     frame+="  Mode     ${green}${bold}${label}${reset}"$'\n'
     frame+="  Output   ${output}"$'\n'
@@ -229,14 +310,10 @@ draw_dashboard() {
     frame+="  Playing  ${apps:-nothing}"$'\n\n'
     for entry in "${MODES[@]}"; do
         IFS='|' read -r key _ _ title description <<<"$entry"
-        marker="  "
-        [ "$key" = "$active" ] && marker="${green}>${reset} "
-        frame+="$(printf '  %s%s  %-15s %s%s%s' "$marker" "$key" "$title" "$dim" "$description" "$reset")"$'\n'
+        frame+=$(dashboard_row "$key" "$title" "$description")$'\n'
     done
-    marker="  "
-    [ "$active" = 0 ] && marker="${green}>${reset} "
-    frame+="  ${marker}0  Effects off/on"$'\n\n'
-    frame+="  ${dim}Press a number to switch   h help   q quit${reset}"$'\n'
+    frame+=$(dashboard_row 0 "Effects off/on" "")$'\n\n'
+    frame+="  ${dim}Up/Down or wheel select   Enter apply   0-6 switch   h help   q quit${reset}"$'\n'
     [ -n "$message" ] && frame+="  ${message}"$'\n'
     printf '%s%s%s' "$goto_top" "$erase_below" "$frame"
 }
@@ -256,10 +333,10 @@ main() {
             fi
             ;;
         help | -h | --help)
-            show_help
             if [ "${2:-}" = --wait ]; then
-                printf '\nPress any key to close'
-                read -rsn1 _
+                page_help
+            else
+                show_help
             fi
             ;;
         status)
